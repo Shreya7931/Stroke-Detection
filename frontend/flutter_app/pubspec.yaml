@@ -1,0 +1,16 @@
+name: flutter_app
+description: Stroke Detection Frontend
+version: 1.0.0+1
+
+environment:
+  sdk: '^3.7.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.9.4+5
+  http: ^0.13.4
+  fluttertoast: ^8.0.8
+
+flutter:
+  uses-material-design: true

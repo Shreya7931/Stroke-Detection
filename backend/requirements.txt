@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+tensorflow
+scikit-learn
+opencv-python
+numpy
+pydantic
+requests
+email-validator
+twilio
+geopy
