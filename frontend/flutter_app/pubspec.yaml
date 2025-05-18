@@ -8,8 +8,15 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  http: ^0.13.6             # HTTP client for sending requests
-  image_picker: ^1.0.4      # Optional if you want to capture video from camera/gallery
+  geolocator: ^9.0.2
+  location: ^5.0.3
+  flutter_sms: ^2.3.2
+  http: ^0.13.3
+  image_picker: ^0.8.4+4
+  record: ^4.0.0  # Updated version
+  url_launcher: ^6.0.0
+  flutter_tts: ^3.2.1  # For text-to-speech if needed
+  convert: ^3.0.1     # Optional if you want to capture video from camera/gallery
   camera: ^0.9.4+5          # For live camera feed recording
   file_picker: ^5.2.5       # For selecting local video files
   path_provider: ^2.1.1     # For accessing file paths if needed
