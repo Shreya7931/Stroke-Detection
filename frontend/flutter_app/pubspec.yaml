@@ -24,3 +24,8 @@ dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/normal_face.png
+    - assets/images/drooped_face.png
+    - assets/images/symmetrical_arms.png
+    - assets/images/asymmetrical_arms.png

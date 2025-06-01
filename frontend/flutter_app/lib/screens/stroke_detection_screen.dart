@@ -18,6 +18,7 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
   List<Hospital> nearbyHospitals = [];
   bool isLoading = false;
   String? error;
+  Position? _currentPosition;
 
   @override
   void initState() {
@@ -34,8 +35,11 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
     });
 
     try {
-      Position position = await _determinePosition();
-      final hospitals = await fetchHospitalsFromOverpass(position.latitude, position.longitude);
+      _currentPosition = await _determinePosition();
+      final hospitals = await fetchHospitalsFromOverpass(
+        _currentPosition!.latitude, 
+        _currentPosition!.longitude
+      );
       setState(() {
         nearbyHospitals = hospitals;
         isLoading = false;
@@ -73,7 +77,7 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
   }
 
   Future<List<Hospital>> fetchHospitalsFromOverpass(double lat, double lon) async {
-    final radius = 5000; // 5 km radius
+    final radius = 2000; // 2km radius
     final query = '''
     [out:json];
     node
@@ -97,6 +101,8 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
       return Hospital(
         name: tags['name'] ?? 'Unnamed Hospital',
         phone: tags['phone'] ?? '911', // fallback to 911 if no phone found
+        lat: e['lat']?.toDouble(),
+        lon: e['lon']?.toDouble(),
       );
     }).toList();
   }
@@ -105,6 +111,28 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
     final url = 'tel:$number';
     if (await canLaunch(url)) {
       await launch(url);
+    } else {
+      throw 'Could not launch $url';
+    }
+  }
+
+  Future<void> _openHospitalDirections(double? hospitalLat, double? hospitalLon) async {
+    if (_currentPosition == null || hospitalLat == null || hospitalLon == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not determine location for directions'))
+      );
+      return;
+    }
+
+    final url = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1'
+      '&origin=${_currentPosition!.latitude},${_currentPosition!.longitude}'
+      '&destination=$hospitalLat,$hospitalLon'
+      '&travelmode=driving'
+    );
+
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url);
     } else {
       throw 'Could not launch $url';
     }
@@ -143,10 +171,33 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
                         itemCount: nearbyHospitals.length,
                         itemBuilder: (context, index) {
                           final hospital = nearbyHospitals[index];
-                          return _EmergencyButton(
-                            icon: Icons.local_hospital,
-                            label: hospital.name,
-                            onPressed: () => _callEmergency(hospital.phone),
+                          return Column(
+                            children: [
+                              ListTile(
+                                leading: Icon(Icons.local_hospital, size: 40),
+                                title: Text(hospital.name),
+                                subtitle: hospital.phone != '911' 
+                                    ? Text(hospital.phone)
+                                    : null,
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: Icon(Icons.phone),
+                                      onPressed: () => _callEmergency(hospital.phone),
+                                    ),
+                                    IconButton(
+                                      icon: Icon(Icons.directions),
+                                      onPressed: () => _openHospitalDirections(
+                                        hospital.lat, 
+                                        hospital.lon
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Divider(),
+                            ],
                           );
                         },
                       ),
@@ -155,7 +206,7 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
                   _EmergencyButton(
                     icon: Icons.emergency,
                     label: 'Call Ambulance',
-                    onPressed: () => _callEmergency('911'),
+                    onPressed: () => _callEmergency('108'),
                     isAmbulance: true,
                   ),
                 ],
@@ -189,8 +240,15 @@ class _StrokeDetectedScreenState extends State<StrokeDetectedScreen> {
 class Hospital {
   final String name;
   final String phone;
+  final double? lat;
+  final double? lon;
 
-  Hospital({required this.name, required this.phone});
+  Hospital({
+    required this.name,
+    required this.phone,
+    this.lat,
+    this.lon,
+  });
 }
 
 class _EmergencyButton extends StatelessWidget {
@@ -221,6 +279,7 @@ class _EmergencyButton extends StatelessWidget {
           backgroundColor: isAmbulance
               ? Colors.red
               : Theme.of(context).colorScheme.primary,
+          foregroundColor: Colors.white,
           minimumSize: Size(double.infinity, 50),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(10),

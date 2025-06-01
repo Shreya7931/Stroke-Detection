@@ -142,13 +142,77 @@ async def analyze_face(file: UploadFile = File(...)):
     return JSONResponse(content=result)
 
 @app.post("/analyze-arm/")
-async def analyze_arm(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    result = analyze_arm_symmetry(file_path)
-    os.remove(file_path)
-    return JSONResponse(content=result)
+async def analyze_arm_live():
+    import cv2
+    import mediapipe as mp
+    import numpy as np
+    import time
+
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose()
+    mp_drawing = mp.solutions.drawing_utils
+
+    cap = cv2.VideoCapture(0)
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    video_path = os.path.join(UPLOAD_FOLDER, 'arm_symmetry_video.avi')
+    out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'XVID'), 20, (frame_width, frame_height))
+
+    start_time = time.time()
+    duration = 15
+
+    symmetrical_frames = 0
+    total_frames = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(image)
+
+        if results.pose_landmarks:
+            landmarks = results.pose_landmarks.landmark
+
+            left_shoulder = (int(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].x * frame.shape[1]),
+                             int(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].y * frame.shape[0]))
+            right_shoulder = (int(landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].x * frame.shape[1]),
+                              int(landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].y * frame.shape[0]))
+            left_wrist = (int(landmarks[mp_pose.PoseLandmark.LEFT_WRIST].x * frame.shape[1]),
+                          int(landmarks[mp_pose.PoseLandmark.LEFT_WRIST].y * frame.shape[0]))
+            right_wrist = (int(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST].x * frame.shape[1]),
+                           int(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST].y * frame.shape[0]))
+
+            mid_x = (left_shoulder[0] + right_shoulder[0]) // 2
+            left_wrist_dist = abs(left_wrist[0] - mid_x)
+            right_wrist_dist = abs(right_wrist[0] - mid_x)
+
+            threshold = 20  # Pixel tolerance
+            if abs(left_wrist_dist - right_wrist_dist) > threshold:
+                symmetrical_frames += 1
+            total_frames += 1
+
+        out.write(frame)
+
+        if time.time() - start_time > duration:
+            break
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+
+    symmetry_percentage = (symmetrical_frames / total_frames) * 100 if total_frames > 0 else 0
+    stroke_detected = symmetry_percentage < 70
+
+    return JSONResponse(content={
+        "stroke_detected": stroke_detected,
+        "symmetry_percentage": symmetry_percentage
+    })
+
 
 @app.post("/analyze-speech/")
 async def analyze_speech_endpoint(file: UploadFile = File(...)):
