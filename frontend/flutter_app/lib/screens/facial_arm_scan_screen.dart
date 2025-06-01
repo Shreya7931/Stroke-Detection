@@ -16,12 +16,13 @@ class FacialArmScanScreen extends StatefulWidget {
   State<FacialArmScanScreen> createState() => _FacialArmScanScreenState();
 }
 
-class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
+class _FacialArmScanScreenState extends State<FacialArmScanScreen> 
+    with WidgetsBindingObserver {
   final ImagePicker _picker = ImagePicker();
   final Record _audioRecorder = Record();
   bool _isUploading = false;
   bool _isRecording = false;
-  String _serverUrl = "http://192.168.42.65:8000";
+  String _serverUrl = "http://192.168.1.6:8000";
   List<double> _testResults = [];
 
   CameraController? _cameraController;
@@ -29,6 +30,8 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
   bool _isCameraInitialized = false;
   bool _isArmTestRunning = false;
   bool _armTestCompleted = false;
+  bool _isFaceTestRunning = false;
+  bool _faceTestCompleted = false;
   double? _armTestResult;
   double? _faceTestResult;
 
@@ -44,11 +47,52 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    
+    // Stop any ongoing operations before disposing
+    _isArmTestRunning = false;
+    _isFaceTestRunning = false;
+    
+    // Dispose camera controller safely
+    _cameraController?.dispose().catchError((e) {
+      print("Error disposing camera: $e");
+    });
+    
+    _audioRecorder.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final CameraController? cameraController = _cameraController;
+
+    // App state changed before we got the chance to initialize.
+    if (cameraController == null || !cameraController.value.isInitialized) {
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive) {
+      // Camera will be disposed and re-initialized when app resumes
+    } else if (state == AppLifecycleState.resumed) {
+      _initializeCamera();
+    }
+  }
+
+  // Improved camera initialization with better error handling
   Future<void> _initializeCamera() async {
     try {
+      // Dispose existing controller first
+      if (_cameraController != null) {
+        await _cameraController!.dispose();
+        _cameraController = null;
+      }
+      
       _cameras = await availableCameras();
       if (_cameras != null && _cameras!.isNotEmpty) {
         CameraDescription selectedCamera = _cameras!.firstWhere(
@@ -63,6 +107,10 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
         );
 
         await _cameraController!.initialize();
+        
+        // Add a small delay to ensure camera is fully ready
+        await Future.delayed(Duration(milliseconds: 500));
+        
         if (mounted) {
           setState(() {
             _isCameraInitialized = true;
@@ -70,92 +118,247 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
         }
       }
     } catch (e) {
+      print("Camera initialization error: $e");
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = false;
+        });
+      }
       _showError("Camera initialization failed: $e");
     }
   }
 
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    _audioRecorder.dispose();
-    super.dispose();
+  // Add method to refresh camera between tests
+  Future<void> _refreshCamera() async {
+    if (mounted) {
+      setState(() {
+        _isCameraInitialized = false;
+      });
+    }
+    
+    // Small delay to let UI update
+    await Future.delayed(Duration(milliseconds: 100));
+    
+    await _initializeCamera();
   }
 
-  Future<void> _uploadFaceVideo() async {
-    final XFile? video = await _picker.pickVideo(source: ImageSource.camera);
-    if (video == null) return;
-
-    setState(() {
-      _isUploading = true;
-      _faceTestStatus = "Analyzing facial symmetry...";
-    });
+  // Modified _ensureCameraReady method
+  Future<void> _ensureCameraReady() async {
+    if (_cameraController == null || 
+        !_cameraController!.value.isInitialized ||
+        _cameraController!.value.hasError) {
+      await _refreshCamera();
+    }
     
-    try {
-      var uri = Uri.parse("$_serverUrl/analyze-face");
-      var request = http.MultipartRequest('POST', uri);
+    // Double check after refresh
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      throw Exception("Camera failed to initialize");
+    }
+  }
 
-      if (kIsWeb) {
-        final bytes = await video.readAsBytes();
-        final multipartFile = http.MultipartFile.fromBytes(
-          'file',
-          bytes,
-          filename: video.name,
-          contentType: MediaType('video', 'mp4'),
-        );
-        request.files.add(multipartFile);
-      } else {
-        request.files.add(await http.MultipartFile.fromPath('file', video.path));
+  // Debug method to understand camera state
+  void _debugCameraState() {
+    print("=== Camera Debug Info ===");
+    print("Camera initialized: $_isCameraInitialized");
+    print("Camera controller null: ${_cameraController == null}");
+    if (_cameraController != null) {
+      print("Camera value initialized: ${_cameraController!.value.isInitialized}");
+      print("Camera aspect ratio: ${_cameraController!.value.aspectRatio}");
+      print("Camera preview size: ${_cameraController!.value.previewSize}");
+      print("Has error: ${_cameraController!.value.hasError}");
+      if (_cameraController!.value.hasError) {
+        print("Error: ${_cameraController!.value.errorDescription}");
       }
+    }
+    print("Arm test running: $_isArmTestRunning");
+    print("Face test running: $_isFaceTestRunning");
+    print("========================");
+  }
 
-      var response = await request.send();
-      var respStr = await response.stream.bytesToString();
-      var jsonResponse = json.decode(respStr);
+  // Improved camera preview widget
+  Widget _buildCameraPreview() {
+    if (!_isCameraInitialized || _cameraController == null) {
+      return Container(
+        height: 400,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Colors.white),
+              SizedBox(height: 16),
+              Text(
+                "Initializing camera...",
+                style: TextStyle(color: Colors.white),
+              ),
+              SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _refreshCamera,
+                child: Text("Retry Camera"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white.withOpacity(0.2),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
-      double score = jsonResponse['stroke_ratio']?.toDouble() ?? 0.0;
-      _faceTestResult = score;
-      _testResults.add(score);
+    if (!_cameraController!.value.isInitialized || _cameraController!.value.hasError) {
+      return Container(
+        height: 400,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.camera_alt, color: Colors.white, size: 48),
+              SizedBox(height: 16),
+              Text(
+                "Camera error or not ready",
+                style: TextStyle(color: Colors.white),
+              ),
+              if (_cameraController!.value.hasError)
+                Text(
+                  _cameraController!.value.errorDescription ?? "Unknown error",
+                  style: TextStyle(color: Colors.red[300], fontSize: 12),
+                  textAlign: TextAlign.center,
+                ),
+              SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _refreshCamera,
+                child: Text("Retry Camera"),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white.withOpacity(0.2),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      height: 400,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: OverflowBox(
+          alignment: Alignment.center,
+          child: AspectRatio(
+            aspectRatio: _cameraController!.value.aspectRatio,
+            child: CameraPreview(_cameraController!),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Updated face test method
+  Future<void> _startFaceSymmetryTest() async {
+    try {
+      _debugCameraState();
       
       setState(() {
-        _faceTestStatus = "Facial symmetry analysis completed: ${(score * 100).toStringAsFixed(1)}%";
+        _isFaceTestRunning = true;
+        _faceTestCompleted = false;
+        _faceTestStatus = "Preparing camera...";
+        _faceTestResult = null;
+      });
+
+      // Ensure camera is ready before starting
+      await _ensureCameraReady();
+      
+      setState(() {
+        _faceTestStatus = "Get ready... Please look directly at the camera for 5 seconds.";
+      });
+
+      // Wait for 5 seconds while the backend captures and analyzes
+      await Future.delayed(Duration(seconds: 5));
+
+      setState(() {
+        _faceTestStatus = "Analyzing facial symmetry...";
+      });
+
+      var uri = Uri.parse("$_serverUrl/analyze-face/");
+      var response = await http.post(uri);
+
+      if (response.statusCode == 200) {
+        var jsonResponse = json.decode(response.body);
+        double score = jsonResponse['stroke_ratio']?.toDouble() ?? 0.0;
+        _faceTestResult = score;
+        _testResults.add(score);
+        
+        setState(() {
+          _faceTestStatus = "Facial symmetry analysis completed: ${((1 - score) * 100).toStringAsFixed(1)}% symmetry";
+          _faceTestCompleted = true;
+        });
+        
+        if (_testResults.length >= 2) await _sendCombinedAnalysis();
+      } else {
+        _showError("Face test failed: ${response.body}");
+      }
+    } catch (e) {
+      _showError("Face test error: $e");
+    } finally {
+      setState(() {
+        _isFaceTestRunning = false;
       });
       
-      if (_testResults.length >= 2) await _sendCombinedAnalysis();
-    } catch (e) {
-      _showError(e.toString());
-    } finally {
-      setState(() => _isUploading = false);
+      // Refresh camera after test completion
+      Future.delayed(Duration(milliseconds: 500), () {
+        if (mounted && !_isArmTestRunning) {
+          _refreshCamera();
+        }
+      });
     }
   }
 
+  // Updated arm test method
   Future<void> _startArmDriftTest() async {
-    if (!_isCameraInitialized) {
-      _showError("Camera not initialized");
-      return;
-    }
-
-    setState(() {
-      _isArmTestRunning = true;
-      _armTestCompleted = false;
-      _armTestStatus = "Get ready... Please raise and hold your arms steady for 15 seconds.";
-      _armTestResult = null;
-    });
-
-    await Future.delayed(Duration(seconds: 15));
-
-    setState(() {
-      _armTestStatus = "Analyzing arm drift...";
-    });
-
     try {
+      _debugCameraState();
+      
+      setState(() {
+        _isArmTestRunning = true;
+        _armTestCompleted = false;
+        _armTestStatus = "Preparing camera...";
+        _armTestResult = null;
+      });
+
+      // Ensure camera is ready before starting
+      await _ensureCameraReady();
+      
+      setState(() {
+        _armTestStatus = "Get ready... Please raise and hold your arms steady for 15 seconds.";
+      });
+
+      await Future.delayed(Duration(seconds: 15));
+
+      setState(() {
+        _armTestStatus = "Analyzing arm drift...";
+      });
+
       var uri = Uri.parse("$_serverUrl/analyze-arm/");
       var response = await http.post(uri);
 
       if (response.statusCode == 200) {
         var jsonResponse = json.decode(response.body);
-
         var symmetryRaw = jsonResponse['symmetry_percentage'] ?? 0.0;
         double symmetryPercentage = symmetryRaw is int ? symmetryRaw.toDouble() : symmetryRaw;
-
         double score = 1 - (symmetryPercentage / 100.0);
         _armTestResult = score;
         _testResults.add(score);
@@ -170,10 +373,17 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
         _showError("Arm test failed: ${response.body}");
       }
     } catch (e) {
-      _showError(e.toString());
+      _showError("Arm test error: $e");
     } finally {
       setState(() {
         _isArmTestRunning = false;
+      });
+      
+      // Refresh camera after test completion
+      Future.delayed(Duration(milliseconds: 500), () {
+        if (mounted && !_isFaceTestRunning) {
+          _refreshCamera();
+        }
       });
     }
   }
@@ -261,7 +471,16 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
     IconData buttonIcon = Icons.play_circle_fill;
     Color? cardColor = Colors.white;
 
-    if (isArmTest) {
+    if (isFaceTest) {
+      if (_faceTestCompleted) {
+        buttonLabel = "Test Completed";
+        buttonIcon = Icons.check_circle_outline;
+        cardColor = Colors.green[50];
+      } else if (_isFaceTestRunning) {
+        buttonLabel = "Running...";
+        buttonIcon = Icons.hourglass_top;
+      }
+    } else if (isArmTest) {
       if (_armTestCompleted) {
         buttonLabel = "Test Completed";
         buttonIcon = Icons.check_circle_outline;
@@ -270,10 +489,6 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
         buttonLabel = "Running...";
         buttonIcon = Icons.hourglass_top;
       }
-    } else if (isFaceTest && _faceTestResult != null) {
-      buttonLabel = "Test Completed";
-      buttonIcon = Icons.check_circle_outline;
-      cardColor = Colors.green[50];
     } else if (isRecording) {
       buttonLabel = "Stop Recording";
       buttonIcon = Icons.stop;
@@ -378,7 +593,7 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
             
             if (isFaceTest && _faceTestResult != null)
               Text(
-                "Symmetry Score: ${(100 - (_faceTestResult! * 100)).toStringAsFixed(1)}%",
+                "Symmetry Score: ${((1 - _faceTestResult!) * 100).toStringAsFixed(1)}%",
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
               ),
             
@@ -393,9 +608,9 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
               child: ElevatedButton.icon(
                 onPressed: (_isUploading || 
                           (isArmTest && (_armTestCompleted || _isArmTestRunning)) ||
-                          (isFaceTest && _faceTestResult != null))
+                          (isFaceTest && (_faceTestCompleted || _isFaceTestRunning)))
                     ? null
-                    : (_isUploading ? null : onPressed),
+                    : onPressed,
                 icon: Icon(buttonIcon),
                 label: Text(buttonLabel),
                 style: ElevatedButton.styleFrom(
@@ -412,6 +627,38 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
     );
   }
 
+  Widget _buildTestingView() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          _isArmTestRunning ? _armTestStatus : _faceTestStatus,
+          style: TextStyle(fontSize: 16, color: Colors.grey[700]),
+          textAlign: TextAlign.center,
+        ),
+        SizedBox(height: 12),
+        
+        // Improved camera preview
+        _buildCameraPreview(),
+        
+        SizedBox(height: 20),
+        ElevatedButton(
+          onPressed: () {
+            setState(() {
+              _isArmTestRunning = false;
+              _isFaceTestRunning = false;
+              _armTestStatus = "";
+              _faceTestStatus = "";
+            });
+            // Refresh camera after canceling
+            _refreshCamera();
+          },
+          child: Text(_isArmTestRunning ? "Cancel Arm Test" : "Cancel Face Test"),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -424,39 +671,12 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: _isArmTestRunning
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _armTestStatus,
-                    style: TextStyle(fontSize: 16, color: Colors.grey[700]),
-                    textAlign: TextAlign.center,
-                  ),
-                  SizedBox(height: 12),
-                  _isCameraInitialized && _cameraController != null
-                      ? AspectRatio(
-                          aspectRatio: _cameraController!.value.aspectRatio,
-                          child: CameraPreview(_cameraController!),
-                        )
-                      : Center(child: CircularProgressIndicator()),
-                  SizedBox(height: 20),
-                  ElevatedButton(
-                    onPressed: () {
-                      setState(() {
-                        _isArmTestRunning = false;
-                        _armTestStatus = "";
-                        _armTestCompleted = false;
-                      });
-                    },
-                    child: Text("Cancel Arm Test"),
-                  ),
-                ],
-              )
+        child: (_isArmTestRunning || _isFaceTestRunning)
+            ? _buildTestingView()
             : SingleChildScrollView(
                 child: Column(
                   children: [
-                    _buildTestCard("Facial Symmetry (Video Scan)", _uploadFaceVideo),
+                    _buildTestCard("Facial Symmetry (Live Camera for 5 Seconds)", _startFaceSymmetryTest),
                     _buildTestCard(
                       "Arm Drift Test (Raise Arm and Hold for 15 Seconds)",
                       _startArmDriftTest,
@@ -483,6 +703,7 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen> {
     setState(() {
       _isUploading = false;
       _isArmTestRunning = false;
+      _isFaceTestRunning = false;
     });
   }
 }

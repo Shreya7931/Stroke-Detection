@@ -1,3 +1,5 @@
+# main.py
+
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -7,10 +9,8 @@ import os
 import shutil
 import numpy as np
 from twilio.rest import Client
-import os
-from fastapi import Form
 from typing import List
-
+import time
 
 TWILIO_SID = os.getenv('TWILIO_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
@@ -20,7 +20,6 @@ twilio_client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +27,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MediaPipe initialization
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
 
@@ -38,6 +36,7 @@ pose = mp_pose.Pose()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 
 def calculate_face_symmetry(frame):
     img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -49,19 +48,15 @@ def calculate_face_symmetry(frame):
     landmarks = results.multi_face_landmarks[0].landmark
     img_h, img_w, _ = frame.shape
 
-    symmetrical_pairs = [
-        (234, 454), (130, 359), (55, 285), (159, 386), (145, 374)
-    ]
-
+    symmetrical_pairs = [(234, 454), (130, 359), (55, 285), (159, 386), (145, 374)]
     diffs = []
+
     for left_idx, right_idx in symmetrical_pairs:
         left_point = landmarks[left_idx]
         right_point = landmarks[right_idx]
 
         left_x = left_point.x * img_w
         right_x = right_point.x * img_w
-        left_y = left_point.y * img_h
-        right_y = right_point.y * img_h
 
         nose = landmarks[9]
         nose_x = nose.x * img_w
@@ -77,6 +72,7 @@ def calculate_face_symmetry(frame):
     symmetry_score = 1 - (avg_diff / face_width)
 
     return symmetry_score
+
 
 def analyze_face_symmetry(video_path: str):
     cap = cv2.VideoCapture(video_path)
@@ -97,6 +93,7 @@ def analyze_face_symmetry(video_path: str):
     stroke_detected = avg_symmetry < 0.85
     stroke_ratio = 1 - avg_symmetry
     return {"stroke_detected": stroke_detected, "stroke_ratio": stroke_ratio}
+
 
 def analyze_arm_symmetry(video_path: str):
     cap = cv2.VideoCapture(video_path)
@@ -122,8 +119,11 @@ def analyze_arm_symmetry(video_path: str):
     stroke_detected = symmetry_percentage < 70
     return {"stroke_detected": stroke_detected, "symmetry_percentage": symmetry_percentage}
 
+
 def analyze_speech(audio_path: str):
     return {"stroke_detected": False, "confidence": 0.0}
+
+
 def send_sms(to_number: str, message: str):
     message = twilio_client.messages.create(
         body=message,
@@ -132,26 +132,56 @@ def send_sms(to_number: str, message: str):
     )
     return message.sid
 
+
 @app.post("/analyze-face/")
-async def analyze_face(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    result = analyze_face_symmetry(file_path)
-    os.remove(file_path)
-    return JSONResponse(content=result)
+async def analyze_face_live():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        return JSONResponse(content={"error": "Could not open camera"}, status_code=500)
+
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    video_path = os.path.join(UPLOAD_FOLDER, 'face_symmetry_video.avi')
+    out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'XVID'), 20, (frame_width, frame_height))
+
+    start_time = time.time()
+    duration = 5
+    symmetry_scores = []
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        score = calculate_face_symmetry(frame)
+        if score is not None:
+            symmetry_scores.append(score)
+
+        out.write(frame)
+
+        if time.time() - start_time > duration:
+            break
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+    if os.path.exists(video_path):
+        os.remove(video_path)
+
+    if not symmetry_scores:
+        return JSONResponse(content={"stroke_detected": False, "stroke_ratio": 0.0, "message": "No face detected during test."})
+
+    avg_symmetry = float(np.mean(symmetry_scores))
+    stroke_detected = avg_symmetry < 0.85
+    stroke_ratio = 1 - avg_symmetry
+
+    return JSONResponse(content={"stroke_detected": stroke_detected, "stroke_ratio": stroke_ratio})
+
 
 @app.post("/analyze-arm/")
 async def analyze_arm_live():
-    import cv2
-    import mediapipe as mp
-    import numpy as np
-    import time
-
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose()
-    mp_drawing = mp.solutions.drawing_utils
-
     cap = cv2.VideoCapture(0)
     frame_width = int(cap.get(3))
     frame_height = int(cap.get(4))
@@ -160,7 +190,6 @@ async def analyze_arm_live():
 
     start_time = time.time()
     duration = 15
-
     symmetrical_frames = 0
     total_frames = 0
 
@@ -174,7 +203,6 @@ async def analyze_arm_live():
 
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
-
             left_shoulder = (int(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].x * frame.shape[1]),
                              int(landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].y * frame.shape[0]))
             right_shoulder = (int(landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].x * frame.shape[1]),
@@ -188,7 +216,7 @@ async def analyze_arm_live():
             left_wrist_dist = abs(left_wrist[0] - mid_x)
             right_wrist_dist = abs(right_wrist[0] - mid_x)
 
-            threshold = 20  # Pixel tolerance
+            threshold = 20
             if abs(left_wrist_dist - right_wrist_dist) > threshold:
                 symmetrical_frames += 1
             total_frames += 1
@@ -204,14 +232,13 @@ async def analyze_arm_live():
     cap.release()
     out.release()
     cv2.destroyAllWindows()
+    if os.path.exists(video_path):
+        os.remove(video_path)
 
     symmetry_percentage = (symmetrical_frames / total_frames) * 100 if total_frames > 0 else 0
     stroke_detected = symmetry_percentage < 70
 
-    return JSONResponse(content={
-        "stroke_detected": stroke_detected,
-        "symmetry_percentage": symmetry_percentage
-    })
+    return JSONResponse(content={"stroke_detected": stroke_detected, "symmetry_percentage": symmetry_percentage})
 
 
 @app.post("/analyze-speech/")
@@ -222,6 +249,7 @@ async def analyze_speech_endpoint(file: UploadFile = File(...)):
     result = analyze_speech(file_path)
     os.remove(file_path)
     return JSONResponse(content=result)
+
 
 @app.post("/detect-stroke/")
 async def detect_stroke(
@@ -240,6 +268,7 @@ async def detect_stroke(
             except Exception as e:
                 print(f"Failed to send SMS to {contact}: {e}")
     return JSONResponse(content={"stroke_detected": stroke_detected})
+
 
 if __name__ == "__main__":
     import uvicorn
