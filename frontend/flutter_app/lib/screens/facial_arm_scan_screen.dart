@@ -7,7 +7,8 @@ import 'package:http_parser/http_parser.dart';
 import 'package:record/record.dart';
 import 'package:camera/camera.dart';
 import 'stroke_detection_screen.dart';
-
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 class FacialArmScanScreen extends StatefulWidget {
   final List<String> emergencyContacts;
   const FacialArmScanScreen({required this.emergencyContacts});
@@ -22,7 +23,7 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen>
   final Record _audioRecorder = Record();
   bool _isUploading = false;
   bool _isRecording = false;
-  String _serverUrl = "http://192.168.1.6:8000";
+  String _serverUrl = "http://localhost:8000";
   List<double> _testResults = [];
 
   CameraController? _cameraController;
@@ -268,364 +269,382 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen>
   }
 
   // Updated face test method
-  Future<void> _startFaceSymmetryTest() async {
-    try {
-      _debugCameraState();
-      
-      setState(() {
-        _isFaceTestRunning = true;
-        _faceTestCompleted = false;
-        _faceTestStatus = "Preparing camera...";
-        _faceTestResult = null;
-      });
+ Future<void> _startFaceSymmetryTest() async {
+  try {
+    setState(() {
+      _isFaceTestRunning = true;
+      _faceTestStatus = "Preparing camera...";
+      _faceTestResult = null;
+    });
 
-      // Ensure camera is ready before starting
-      await _ensureCameraReady();
-      
-      setState(() {
-        _faceTestStatus = "Get ready... Please look directly at the camera for 5 seconds.";
-      });
-
-      // Wait for 5 seconds while the backend captures and analyzes
-      await Future.delayed(Duration(seconds: 5));
-
-      setState(() {
-        _faceTestStatus = "Analyzing facial symmetry...";
-      });
-
-      var uri = Uri.parse("$_serverUrl/analyze-face/");
-      var response = await http.post(uri);
-
-      if (response.statusCode == 200) {
-        var jsonResponse = json.decode(response.body);
-        double score = jsonResponse['stroke_ratio']?.toDouble() ?? 0.0;
-        _faceTestResult = score;
-        _testResults.add(score);
-        
-        setState(() {
-          _faceTestStatus = "Facial symmetry analysis completed: ${((1 - score) * 100).toStringAsFixed(1)}% symmetry";
-          _faceTestCompleted = true;
-        });
-        
-        if (_testResults.length >= 2) await _sendCombinedAnalysis();
-      } else {
-        _showError("Face test failed: ${response.body}");
-      }
-    } catch (e) {
-      _showError("Face test error: $e");
-    } finally {
-      setState(() {
-        _isFaceTestRunning = false;
-      });
-      
-      // Refresh camera after test completion
-      Future.delayed(Duration(milliseconds: 500), () {
-        if (mounted && !_isArmTestRunning) {
-          _refreshCamera();
-        }
-      });
-    }
-  }
-
-  // Updated arm test method
-  Future<void> _startArmDriftTest() async {
-    try {
-      _debugCameraState();
-      
-      setState(() {
-        _isArmTestRunning = true;
-        _armTestCompleted = false;
-        _armTestStatus = "Preparing camera...";
-        _armTestResult = null;
-      });
-
-      // Ensure camera is ready before starting
-      await _ensureCameraReady();
-      
-      setState(() {
-        _armTestStatus = "Get ready... Please raise and hold your arms steady for 15 seconds.";
-      });
-
-      await Future.delayed(Duration(seconds: 15));
-
-      setState(() {
-        _armTestStatus = "Analyzing arm drift...";
-      });
-
-      var uri = Uri.parse("$_serverUrl/analyze-arm/");
-      var response = await http.post(uri);
-
-      if (response.statusCode == 200) {
-        var jsonResponse = json.decode(response.body);
-        var symmetryRaw = jsonResponse['symmetry_percentage'] ?? 0.0;
-        double symmetryPercentage = symmetryRaw is int ? symmetryRaw.toDouble() : symmetryRaw;
-        double score = 1 - (symmetryPercentage / 100.0);
-        _armTestResult = score;
-        _testResults.add(score);
-        
-        setState(() {
-          _armTestStatus = "Arm drift analysis completed: ${(symmetryPercentage).toStringAsFixed(1)}% symmetry";
-          _armTestCompleted = true;
-        });
-        
-        if (_testResults.length >= 2) await _sendCombinedAnalysis();
-      } else {
-        _showError("Arm test failed: ${response.body}");
-      }
-    } catch (e) {
-      _showError("Arm test error: $e");
-    } finally {
-      setState(() {
-        _isArmTestRunning = false;
-      });
-      
-      // Refresh camera after test completion
-      Future.delayed(Duration(milliseconds: 500), () {
-        if (mounted && !_isFaceTestRunning) {
-          _refreshCamera();
-        }
-      });
-    }
-  }
-
-  Future<void> _recordAndUploadSpeech() async {
-    if (!_isRecording) {
-      if (!await _audioRecorder.hasPermission()) {
-        _showError("Microphone permission denied");
-        return;
-      }
-      setState(() => _isRecording = true);
-      await _audioRecorder.start();
-    } else {
-      setState(() => _isUploading = true);
-      String? path = await _audioRecorder.stop();
-
-      if (path == null) {
-        setState(() {
-          _isRecording = false;
-          _isUploading = false;
-        });
-        return;
-      }
-
-      try {
-        var uri = Uri.parse("$_serverUrl/analyze-speech");
-        var request = http.MultipartRequest('POST', uri);
-        request.files.add(await http.MultipartFile.fromPath('file', path));
-
-        var response = await request.send();
-        var respStr = await response.stream.bytesToString();
-        var jsonResponse = json.decode(respStr);
-
-        double score = jsonResponse['confidence']?.toDouble() ?? 0.0;
-        _testResults.add(score);
-        await _sendCombinedAnalysis();
-      } catch (e) {
-        _showError(e.toString());
-      } finally {
-        setState(() {
-          _isRecording = false;
-          _isUploading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _sendCombinedAnalysis() async {
-    if (_testResults.length < 2) return;
-
-    try {
-      var uri = Uri.parse("$_serverUrl/detect-stroke");
-      var request = http.MultipartRequest('POST', uri);
-      request.fields['face_result'] = _testResults[0].toString();
-      request.fields['arm_result'] = _testResults[1].toString();
-      request.fields['speech_result'] = _testResults.length > 2 ? _testResults[2].toString() : "0.0";
-
-      for (int i = 0; i < widget.emergencyContacts.length; i++) {
-        request.fields['emergency_contacts[$i]'] = widget.emergencyContacts[i];
-      }
-
-      var response = await request.send();
-      var respStr = await response.stream.bytesToString();
-      var jsonResponse = json.decode(respStr);
-
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => StrokeDetectedScreen(
-            strokeDetected: true, //jsonResponse['stroke_detected'] ?? false,
-            emergencyContacts: widget.emergencyContacts,
-          ),
-        ),
-      );
-    } catch (e) {
-      _showError(e.toString());
-    }
-  }
-
-  Widget _buildTestCard(String title, VoidCallback onPressed, {bool isRecording = false}) {
-    bool isFaceTest = title.contains("Facial Symmetry");
-    bool isArmTest = title.contains("Arm Drift Test");
+    await _ensureCameraReady();
     
-    String buttonLabel = "Start";
-    IconData buttonIcon = Icons.play_circle_fill;
-    Color? cardColor = Colors.white;
+    setState(() {
+      _faceTestStatus = "Get ready... Please look directly at the camera for 5 seconds.";
+    });
 
-    if (isFaceTest) {
-      if (_faceTestCompleted) {
-        buttonLabel = "Test Completed";
-        buttonIcon = Icons.check_circle_outline;
-        cardColor = Colors.green[50];
-      } else if (_isFaceTestRunning) {
-        buttonLabel = "Running...";
-        buttonIcon = Icons.hourglass_top;
+    // Capture frames for 5 seconds
+    List<Uint8List> capturedFrames = [];
+    final startTime = DateTime.now();
+    final frameInterval = Duration(milliseconds: 200); // 5 FPS
+    
+    while (DateTime.now().difference(startTime).inSeconds < 5) {
+      if (!_isFaceTestRunning) break; // Allow cancellation
+      
+      try {
+        if (kIsWeb) {
+          // Web-specific capture
+          final image = await _cameraController!.takePicture();
+          final bytes = await image.readAsBytes();
+          capturedFrames.add(bytes);
+        } else {
+          // Mobile capture
+          final frame = await _cameraController!.takePicture();
+          capturedFrames.add(await frame.readAsBytes());
+        }
+        await Future.delayed(frameInterval);
+      } catch (e) {
+        print("Error capturing frame: $e");
       }
-    } else if (isArmTest) {
-      if (_armTestCompleted) {
-        buttonLabel = "Test Completed";
-        buttonIcon = Icons.check_circle_outline;
-        cardColor = Colors.green[50];
-      } else if (_isArmTestRunning) {
-        buttonLabel = "Running...";
-        buttonIcon = Icons.hourglass_top;
-      }
-    } else if (isRecording) {
-      buttonLabel = "Stop Recording";
-      buttonIcon = Icons.stop;
     }
 
-    return Card(
-      color: cardColor,
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      margin: EdgeInsets.symmetric(vertical: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-            SizedBox(height: 12),
-            
-            if (isFaceTest) ...[
-              Text("Examples:", style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  Column(
-                    children: [
-                      Text("Normal Face", style: TextStyle(fontSize: 12)),
-                      SizedBox(height: 4),
-                      Image.asset(
-                        normalFaceImage,
-                        height: 120,
-                        fit: BoxFit.contain,
-                      ),
-                    ],
-                  ),
-                  Column(
-                    children: [
-                      Text("Drooped Face", style: TextStyle(fontSize: 12)),
-                      SizedBox(height: 4),
-                      Image.asset(
-                        droopedFaceImage,
-                        height: 120,
-                        fit: BoxFit.contain,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              SizedBox(height: 12),
-            ],
-            
-            if (isArmTest) ...[
-              Text("Examples:", style: TextStyle(fontWeight: FontWeight.bold)),
-              SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  Column(
-                    children: [
-                      Text("Symmetrical Arms", style: TextStyle(fontSize: 12)),
-                      SizedBox(height: 4),
-                      Image.asset(
-                        symmetricalArmsImage,
-                        height: 120,
-                        fit: BoxFit.contain,
-                      ),
-                    ],
-                  ),
-                  Column(
-                    children: [
-                      Text("Asymmetrical Arms", style: TextStyle(fontSize: 12)),
-                      SizedBox(height: 4),
-                      Image.asset(
-                        asymmetricalArmsImage,
-                        height: 120,
-                        fit: BoxFit.contain,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              SizedBox(height: 12),
-            ],
-            
-            if (isFaceTest && _faceTestStatus.isNotEmpty)
-              Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text(
-                  _faceTestStatus,
-                  style: TextStyle(color: Colors.blue[800]),
-                ),
-              ),
-            
-            if (isArmTest && _armTestStatus.isNotEmpty)
-              Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text(
-                  _armTestStatus,
-                  style: TextStyle(color: Colors.blue[800]),
-                ),
-              ),
-            
-            if (isFaceTest && _faceTestResult != null)
-              Text(
-                "Symmetry Score: ${((1 - _faceTestResult!) * 100).toStringAsFixed(1)}%",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-            
-            if (isArmTest && _armTestResult != null)
-              Text(
-                "Symmetry Score: ${(100 - (_armTestResult! * 100)).toStringAsFixed(1)}%",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-            
-            SizedBox(height: 12),
-            Center(
-              child: ElevatedButton.icon(
-                onPressed: (_isUploading || 
-                          (isArmTest && (_armTestCompleted || _isArmTestRunning)) ||
-                          (isFaceTest && (_faceTestCompleted || _isFaceTestRunning)))
-                    ? null
-                    : onPressed,
-                icon: Icon(buttonIcon),
-                label: Text(buttonLabel),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).primaryColor,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            )
-          ],
+    if (capturedFrames.isEmpty) {
+      _showError("No frames captured");
+      return;
+    }
+
+    setState(() {
+      _faceTestStatus = "Analyzing facial symmetry...";
+    });
+
+    // Create multipart request
+    var uri = Uri.parse("$_serverUrl/analyze-face/");
+    var request = http.MultipartRequest('POST', uri);
+    
+    // Add all frames
+    for (var i = 0; i < capturedFrames.length; i++) {
+      final frameBytes = capturedFrames[i];
+      request.files.add(http.MultipartFile.fromBytes(
+        'frames',
+        frameBytes,
+        filename: 'frame_$i.jpg',
+        contentType: MediaType('image', 'jpeg'),
+      ));
+    }
+
+    var response = await request.send();
+    var responseData = await response.stream.bytesToString();
+    var jsonResponse = json.decode(responseData);
+    
+    bool strokeDetected = jsonResponse['stroke_detected'] ?? false;
+    double avgSymmetry = jsonResponse['avg_symmetry']?.toDouble() ?? 0.0;
+    
+    setState(() {
+      _faceTestResult = strokeDetected ? 1.0 : 0.0;
+      _faceTestStatus = "Facial symmetry analysis completed: "
+          "${(avgSymmetry * 100).toStringAsFixed(1)}% symmetry "
+          "${strokeDetected ? '(ASYMMETRICAL - Potential Issue)' : '(SYMMETRICAL - Normal)'}";
+      _faceTestCompleted = true;
+    });
+    
+    _testResults.add(_faceTestResult!);
+    if (_testResults.length >= 2) await _sendCombinedAnalysis();
+    
+  } catch (e) {
+    _showError("Face test error: $e");
+  } finally {
+    setState(() => _isFaceTestRunning = false);
+    _refreshCamera();
+  }
+}
+
+Future<void> _startArmDriftTest() async {
+  try {
+    setState(() {
+      _isArmTestRunning = true;
+      _armTestStatus = "Preparing camera...";
+      _armTestResult = null;
+    });
+
+    await _ensureCameraReady();
+    
+    setState(() {
+      _armTestStatus = "Get ready... Please raise and hold your arms steady for 15 seconds.";
+    });
+
+    // Capture frames for 15 seconds
+    List<Uint8List> capturedFrames = [];
+    final startTime = DateTime.now();
+    final frameInterval = Duration(milliseconds: 300); // ~3 FPS
+    
+    while (DateTime.now().difference(startTime).inSeconds < 15) {
+      if (!_isArmTestRunning) break;
+      
+      try {
+        if (kIsWeb) {
+          final image = await _cameraController!.takePicture();
+          final bytes = await image.readAsBytes();
+          capturedFrames.add(bytes);
+        } else {
+          final frame = await _cameraController!.takePicture();
+          capturedFrames.add(await frame.readAsBytes());
+        }
+        await Future.delayed(frameInterval);
+      } catch (e) {
+        print("Error capturing frame: $e");
+      }
+    }
+
+    if (capturedFrames.isEmpty) {
+      _showError("No frames captured");
+      return;
+    }
+
+    setState(() {
+      _armTestStatus = "Analyzing arm drift...";
+    });
+
+    var uri = Uri.parse("$_serverUrl/analyze-arm/");
+    var request = http.MultipartRequest('POST', uri);
+    
+    for (var i = 0; i < capturedFrames.length; i++) {
+      request.files.add(http.MultipartFile.fromBytes(
+        'frames',
+        capturedFrames[i],
+        filename: 'frame_$i.jpg',
+        contentType: MediaType('image', 'jpeg'),
+      ));
+    }
+
+    var response = await request.send();
+    var responseData = await response.stream.bytesToString();
+    var jsonResponse = json.decode(responseData);
+    
+    bool strokeDetected = jsonResponse['stroke_detected'] ?? false;
+    double symmetryPercentage = jsonResponse['symmetry_percentage']?.toDouble() ?? 0.0;
+    
+    setState(() {
+      _armTestResult = strokeDetected ? 1.0 : 0.0;
+      _armTestStatus = "Arm drift analysis completed: "
+          "${symmetryPercentage.toStringAsFixed(1)}% symmetry "
+          "${strokeDetected ? '(ASYMMETRICAL - Potential Issue)' : '(SYMMETRICAL - Normal)'}";
+      _armTestCompleted = true;
+    });
+    
+    _testResults.add(_armTestResult!);
+    if (_testResults.length >= 2) await _sendCombinedAnalysis();
+    
+  } catch (e) {
+    _showError("Arm test error: $e");
+  } finally {
+    setState(() => _isArmTestRunning = false);
+    _refreshCamera();
+  }
+}
+// Updated combined analysis method
+Future<void> _sendCombinedAnalysis() async {
+  if (_testResults.length < 2) return;
+
+  try {
+    var uri = Uri.parse("$_serverUrl/detect-stroke/");
+    var request = http.MultipartRequest('POST', uri);
+    
+    // Send boolean results as strings
+    bool faceStrokeDetected = _testResults[0] > 0.5;
+    bool armStrokeDetected = _testResults[1] > 0.5;
+    bool speechStrokeDetected = _testResults.length > 2 ? _testResults[2] > 0.5 : false;
+    
+    request.fields['face_stroke_detected'] = faceStrokeDetected.toString();
+    request.fields['arm_stroke_detected'] = armStrokeDetected.toString();
+    request.fields['speech_stroke_detected'] = speechStrokeDetected.toString();
+
+    for (int i = 0; i < widget.emergencyContacts.length; i++) {
+      request.fields['emergency_contacts'] = widget.emergencyContacts[i];
+    }
+
+    print("Sending to backend:");
+    print("Face: $faceStrokeDetected, Arm: $armStrokeDetected, Speech: $speechStrokeDetected");
+
+    var response = await request.send();
+    var respStr = await response.stream.bytesToString();
+    var jsonResponse = json.decode(respStr);
+
+    print("Backend response: $jsonResponse");
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StrokeDetectedScreen(
+          strokeDetected: jsonResponse['stroke_detected'] ?? false,
+          emergencyContacts: widget.emergencyContacts,
         ),
       ),
     );
+  } catch (e) {
+    _showError("Combined analysis error: $e");
+    print("Error in _sendCombinedAnalysis: $e");
   }
+}
+
+  Widget _buildTestCard(String title, VoidCallback onPressed, {bool isRecording = false}) {
+  bool isFaceTest = title.contains("Facial Symmetry");
+  bool isArmTest = title.contains("Arm Drift Test");
+  
+  String buttonLabel = "Start";
+  IconData buttonIcon = Icons.play_circle_fill;
+  Color? cardColor = Colors.white;
+
+  if (isFaceTest) {
+    if (_faceTestCompleted) {
+      buttonLabel = "Test Completed";
+      buttonIcon = Icons.check_circle_outline;
+      cardColor = (_faceTestResult! > 0.5) ? Colors.red[50] : Colors.green[50];
+    } else if (_isFaceTestRunning) {
+      buttonLabel = "Running...";
+      buttonIcon = Icons.hourglass_top;
+    }
+  } else if (isArmTest) {
+    if (_armTestCompleted) {
+      buttonLabel = "Test Completed";
+      buttonIcon = Icons.check_circle_outline;
+      cardColor = (_armTestResult! > 0.5) ? Colors.red[50] : Colors.green[50];
+    } else if (_isArmTestRunning) {
+      buttonLabel = "Running...";
+      buttonIcon = Icons.hourglass_top;
+    }
+  } else if (isRecording) {
+    buttonLabel = "Stop Recording";
+    buttonIcon = Icons.stop;
+  }
+
+  return Card(
+    color: cardColor,
+    elevation: 4,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    margin: EdgeInsets.symmetric(vertical: 10),
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+          SizedBox(height: 12),
+          
+          // Add example images for face test
+          if (isFaceTest) ...[
+            Text("Examples:", style: TextStyle(fontWeight: FontWeight.bold)),
+            SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                Column(
+                  children: [
+                    Text("Normal Face", style: TextStyle(fontSize: 12)),
+                    SizedBox(height: 4),
+                    Image.asset(
+                      normalFaceImage,
+                      height: 120,
+                      fit: BoxFit.contain,
+                    ),
+                  ],
+                ),
+                Column(
+                  children: [
+                    Text("Drooped Face", style: TextStyle(fontSize: 12)),
+                    SizedBox(height: 4),
+                    Image.asset(
+                      droopedFaceImage,
+                      height: 120,
+                      fit: BoxFit.contain,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+          ],
+          
+          // Add example images for arm test
+          if (isArmTest) ...[
+            Text("Examples:", style: TextStyle(fontWeight: FontWeight.bold)),
+            SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                Column(
+                  children: [
+                    Text("Symmetrical Arms", style: TextStyle(fontSize: 12)),
+                    SizedBox(height: 4),
+                    Image.asset(
+                      symmetricalArmsImage,
+                      height: 120,
+                      fit: BoxFit.contain,
+                    ),
+                  ],
+                ),
+                Column(
+                  children: [
+                    Text("Asymmetrical Arms", style: TextStyle(fontSize: 12)),
+                    SizedBox(height: 4),
+                    Image.asset(
+                      asymmetricalArmsImage,
+                      height: 120,
+                      fit: BoxFit.contain,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+          ],
+          
+          if (isFaceTest && _faceTestStatus.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                _faceTestStatus,
+                style: TextStyle(
+                  color: _faceTestResult != null && _faceTestResult! > 0.5 
+                      ? Colors.red[800] : Colors.blue[800]
+                ),
+              ),
+            ),
+          
+          if (isArmTest && _armTestStatus.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                _armTestStatus,
+                style: TextStyle(
+                  color: _armTestResult != null && _armTestResult! > 0.5 
+                      ? Colors.red[800] : Colors.blue[800]
+                ),
+              ),
+            ),
+          
+          SizedBox(height: 12),
+          Center(
+            child: ElevatedButton.icon(
+              onPressed: (_isUploading || 
+                        (isArmTest && (_armTestCompleted || _isArmTestRunning)) ||
+                        (isFaceTest && (_faceTestCompleted || _isFaceTestRunning)))
+                  ? null
+                  : onPressed,
+              icon: Icon(buttonIcon),
+              label: Text(buttonLabel),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).primaryColor,
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          )
+        ],
+      ),
+    ),
+  );
+}
 
   Widget _buildTestingView() {
     return Column(
@@ -680,11 +699,6 @@ class _FacialArmScanScreenState extends State<FacialArmScanScreen>
                     _buildTestCard(
                       "Arm Drift Test (Raise Arm and Hold for 15 Seconds)",
                       _startArmDriftTest,
-                    ),
-                    _buildTestCard(
-                      "Speech Test",
-                      _recordAndUploadSpeech,
-                      isRecording: _isRecording,
                     ),
                     if (_isUploading)
                       Padding(
